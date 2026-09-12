@@ -1,0 +1,55 @@
+name: ds-cs
+
+services:
+  app:
+    image: dastyaresocial/ds-cs:latest
+    ports:
+      - "8729:8729"
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - rustfs
+    restart: unless-stopped
+    command: sh -c "npm run generate:config && npm run db:migrate && npm run bootstrap:admin && npm run start"
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ds_cs
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    command: /data
+    environment:
+      RUSTFS_ACCESS_KEY: 442c201224d92fbd5df5aa9d
+      RUSTFS_SECRET_KEY: ea8d22810ade922c73ada6bc0c446c5de465db49454c02b8
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    restart: unless-stopped
+
+  rustfs-createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      - rustfs
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set local http://rustfs:9000 442c201224d92fbd5df5aa9d ea8d22810ade922c73ada6bc0c446c5de465db49454c02b8) do echo 'waiting for rustfs...' && sleep 1; done;
+      mc mb --ignore-existing local/ds-cs;
+      exit 0;
+      "
+
+volumes:
+  db-data:
+  rustfs-data:
