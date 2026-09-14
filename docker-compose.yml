@@ -7,11 +7,35 @@ services:
       - "8729:8729"
     env_file:
       - .env
+    volumes:
+      # Brand files shipped into the project by scripts/install.sh. The config/
+      # directory is bind-mounted as a whole so edits apply live on reload — the
+      # app reads app.config.yml and about.config.yml from disk on every request.
+      # (A per-file mount would break when an editor saves atomically, i.e.
+      # rename-over, which orphans the mounted inode.)
+      - ./config:/app/config:ro
+      # Brand public dir, directory-mounted at /app/brand: serves the live
+      # /profile-image.png (user file wins over the baked default) via a route
+      # handler, and survives editors that save by rename-over. Read-write so the
+      # startup guard below can seed the default avatar when your file is
+      # missing — it never overwrites an existing one.
+      - ./public:/app/brand
     depends_on:
-      - db
-      - rustfs
+      db:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
     restart: unless-stopped
-    command: sh -c "npm run generate:config && npm run db:migrate && npm run bootstrap:admin && npm run start"
+    # Self-healing avatar: if ./public/profile-image.png is absent, seed the
+    # baked default into it so the avatar URL always resolves. A custom file is
+    # never touched (docker compose up does NOT copy/overwrite it).
+    command: sh -c "npm run db:migrate && npm run bootstrap:admin && { [ -f /app/brand/profile-image.png ] || cp /app/defaults/profile-image.png /app/brand/profile-image.png; } && npm run generate:icons && npm run start"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8729/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      start_period: 90s
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   db:
     image: postgres:16
@@ -22,6 +46,12 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ds_cs"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   rustfs:
     image: rustfs/rustfs:latest
@@ -32,6 +62,10 @@ services:
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
       RUSTFS_CONSOLE_ENABLE: "true"
+      # Required for browser media uploads (they PUT straight from the browser to
+      # rustfs). Must be the app's origin (NEXT_PUBLIC_APP_URL) or uploads fail
+      # silently with a CORS error in the browser console.
+      RUSTFS_CORS_ALLOWED_ORIGINS: "${NEXT_PUBLIC_APP_URL:-http://localhost:8729}"
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -47,6 +81,7 @@ services:
       /bin/sh -c "
       until (mc alias set local http://rustfs:9000 442c201224d92fbd5df5aa9d ea8d22810ade922c73ada6bc0c446c5de465db49454c02b8) do echo 'waiting for rustfs...' && sleep 1; done;
       mc mb --ignore-existing local/ds-cs;
+      mc anonymous set download local/ds-cs;
       exit 0;
       "
 
